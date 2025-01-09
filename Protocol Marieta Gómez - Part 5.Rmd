@@ -1,0 +1,326 @@
+---
+title: "Single Cell Course - Protocol Part 5"
+Author: Marieta Gómez Matos
+output:
+  html_document:
+    df_print: paged
+---
+
+# Load libraries
+
+```{r setup}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stats)
+library(pheatmap)
+library(ggdendro)
+library(DESeq2)
+```
+
+We set the seed at 42 (as a random number) to make sure that all the random analysis start at the same point:
+
+```{r}
+set.seed(42)
+```
+
+# Clean the enviroment
+
+```{r}
+rm(list = ls())
+gc()
+```
+
+# Load dataset
+
+```{r}
+ple5 <- readRDS("srt_04_ple5.rds")
+```
+
+
+```{r}
+DimPlot(ple5, label = TRUE)
+```
+
+# Study the correlation among clusters
+
+## Downsizing clusters
+
+Since cluster size is very variable (as we previously observed), we will create a random subset of each of them to make them easily comparable:
+
+```{r}
+ple5.small <- subset(ple5, downsample = 40)
+```
+
+
+We can now visualize the more homogeneous cell number:
+
+```{r}
+data <- as.data.frame(table(ple5.small$broad.cell.types)) 
+colnames(data) <- c("cell.type", "count")
+
+data[order(data$count, decreasing = TRUE),] %>%
+  ggplot(aes(x = cell.type, y = count, fill = cell.type)) +
+    geom_col() +
+    theme_classic() +
+    geom_text(aes(label = count),
+      position = position_dodge(width = 0.9),
+              vjust = -0.25) +
+    ggtitle("Cells per cell type") +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+And their distribution in the DimPlot: 
+
+```{r}
+DimPlot(ple5.small)
+```
+
+## Pseudo-bulk analysis
+
+Now that we have properly identified the clusters, we can study their relationship following their gene expression profiles. For that, we have to calculate distances between clusters and then see how close (related) each cell type is with respect to the others. 
+
+The Wilcoxon test --used on Part 3 to find differentially expressed genes-- considers each cell as an individual observation. Therefore, the test does not consider the variability between replicates (different replicates can follow slightly different behaviours due to the batch effect), displaying a tendency to underestimate the variance in gene expression. This causes a bias towards highly expressed genes and, thus, an increase in the false positives.
+
+Consequently, in order to eliminate this phenomenon, we can use the pseudo-bulk analysis, since it considers group of cells (replicate variability) rather than individual cells.
+
+### Calculate the average expression of the different cell types
+
+We create a new Seurat Object containing the average gene expression for each cell type of the previously obtained subset. In this way, we reduce the effect of dropouts as well as the bias in highly expressed genes:
+
+```{r}
+ple5_avg <- AverageExpression(object = ple5.small, return.seurat = TRUE)
+```
+
+```{r}
+ple5_avg
+```
+### Count matrix calculation
+
+We create then a matrix with the previously calculated average dat, getting an average gene expression of each cell type for each gene:
+
+```{r}
+ple5_avg_mtx <- as.data.frame(ple5_avg@assays[["RNA"]]@counts)
+
+head(ple5_avg_mtx)
+```
+
+This table is called pseudo-bulk count table.
+
+### Correlation calculation
+
+Now we calculate a matrix containing the pairwise correlation coefficients (using the Spearman correlation) between cell types for all average gene expression. This correlation corresponds to the relative distance of each cluster with respect to the others. Moreover, it is important to underline that, for this analysis, the distances calculated by non-linear dimensionality reduction methods (e.g., UMAP or t-SNE) cannot be used, since, as we explained in Part 2, those distances are not meaningful anymore.
+
+```{r}
+matrix_cor_avg <- cor(as.matrix(ple5_avg_mtx), method = "spearman")
+
+matrix_cor_avg[1:5, 1:5]
+```
+
+As we can see, since the correlation of a cluster to itself is 1, the diagonal of the matrix is composed by 1.
+
+We can visualize the results with a heatmap:
+
+```{r}
+heatmap <- pheatmap(matrix_cor_avg, main = "Average Expression, Spearman",
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "none",
+                    treeheight_row = 0,
+                    treeheight_col = 40,
+                    fontsize_row = 7,
+                    display_numbers = FALSE)
+```
+
+In this graph, the closer the color to red, the more related the cells are. We can see a relatively strong correlation in all the neurons (as expected), and, additionally, to OPC. 
+Again, we can see the red diagonal indicating the perfect correlation of each cluster to itself. 
+
+Another way to analyze it is using a cluster tree:
+
+```{r}
+cluster.tree.avg <- hclust(as.dist(1 - matrix_cor_avg))
+```
+
+And visualize it using a dendrogram:
+
+```{r}
+ggdendrogram(cluster.tree.avg) + ggtitle("Average Expression, Spearman")
+```
+
+In this way, we can see how related the clusters are, since the different cell types are grouped following their relative gene expression profiles. Moreover, the relative distances between each cluster can be obtained by looking at the y axis. As in the heatmap, all the neurons are clustered together, although the OPC are grouped with them. We could also do bootstrapping to see how often they are cluster together and add some statistical analysis.
+
+Nevertheless, we do not know if this clustering is obtained because the neuronal cells are very conserved or because there is a very high gene expression that triggers that grouping (losing the impact of differentially expressed genes in low levels). 
+
+In order to explore this option, we can visualize the overall gene expression (RNA counts) per cell type and compare it to the number of genes that they express, using a box and whisker plot:
+
+
+```{r}
+ple5.small@meta.data %>%
+  ggplot(aes(x=nCount_RNA, fill=broad.cell.types)) +
+  geom_boxplot(alpha = 0.2) +
+  theme_classic() + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("Counts per Cell")
+```
+
+```{r}
+ ple5.small@meta.data %>%
+  ggplot(aes(x=nFeature_RNA, fill=broad.cell.types)) +
+  geom_boxplot(alpha = 0.2) +
+  theme_classic() + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("Genes per Cell")
+
+```
+
+As we can see, there is a difference in the relative cell type distribution according to the overall expression (RNA count/cell) and amount of genes, what can introduce bias to our results. Therefore, we can perform the same analysis but calculating an specificity index for each gene in each cell type so that we can relativize its gene expression to the overall gene expression average.
+
+## Specificity index
+
+### Preprocessing of the matrix
+
+First, we need to add a column with the gene name: 
+
+```{r}
+ple5_avg_mtx <- dplyr::mutate(ple5_avg_mtx, "gene" = rownames(ple5_avg_mtx))
+
+ple5_avg_mtx
+```
+
+Then we rearrange the previous matrix into a long format (table-like dataframe):
+
+```{r}
+ple5_spec <- tidyr::gather(ple5_avg_mtx, key = "cell.type", value = "avg_expression", -gene)
+
+head(ple5_spec)
+```
+
+In this way, each gene appears each time for each cell type. Now we can group by gene:
+
+```{r}
+ple5_spec <- ple5_spec %>%
+  group_by(gene)
+```
+
+And remove all genes with an average expression of 0 for all cell types (it would give an error, since we cannot divide by 0 when performing the average):
+
+```{r}
+ple5_spec <- dplyr::filter(ple5_spec, sum(avg_expression) > 0)
+```
+
+In other words, we kept just the genes whose sum of avg_expr is positive.
+
+### Calculating the specificity index
+
+Now we create another column with the mean (average) value of the overall expression of each gene across all cell types:
+
+```{r}
+ple5_spec <- dplyr::mutate(ple5_spec, "avg_total" = mean(avg_expression))
+
+head(ple5_spec)
+```
+
+Ungroup the data:
+
+```{r}
+ple5_spec <- ungroup(ple5_spec)
+```
+
+And now we calculate the specificity index by dividing the average expression of each gene in each cell type by the average expression of each gene in total (across all cell types):
+
+```{r}
+ple5_spec <- dplyr::mutate(ple5_spec, "spec_index" = avg_expression/avg_total)
+
+head(ple5_spec)
+```
+
+We get rid of the columns we are not interested in:
+
+```{r}
+ple5_spec_final <- dplyr::select(ple5_spec, -avg_expression, -avg_total)
+
+head(ple5_spec_final)
+```
+
+And now we go back again to the wide format (matrix-like dataframe):
+
+```{r}
+ple5_spec_final <- tidyr::spread(ple5_spec_final, cell.type, spec_index, fill = 0)
+
+head(ple5_spec_final)
+```
+
+And we have to transform it again into a dataframe format (the previous format, tibble, is another form of dataframe used by the tidyr package):
+
+```{r}
+ple5_spec_final <- as.data.frame(ple5_spec_final)
+
+head(ple5_spec_final)
+```
+
+Change the column name by the gene name again:
+
+```{r}
+rownames(ple5_spec_final) <- ple5_spec_final$gene
+
+head(ple5_spec_final)
+```
+
+And, finally, we eliminate the column we created with the gene names:
+
+```{r}
+ple5_spec_final <- dplyr::select(ple5_spec_final, -gene)
+
+head(ple5_spec_final)
+```
+
+At the end, we have a data frame with the specificity indexes instead of gene expression.
+
+### Correlation with the specificity indexes
+
+Now we repeat the previous pairwise correlation analysis using the specificity indexes instead of the average gene expression:
+
+```{r}
+matrix_cor_spec <- cor(as.matrix(ple5_spec_final), method = "spearman")
+
+matrix_cor_spec[1:5, 1:5]
+```
+
+Then make the new heatmap:
+
+```{r}
+heatmap <- pheatmap(matrix_cor_spec, main = "Average Expression, Spearman",
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "none",
+                    treeheight_row = 0,
+                    treeheight_col = 40,
+                    fontsize_row = 7,
+                    display_numbers = FALSE)
+```
+
+This time, we get a slightly different result, since the OPC are now clustered together with the non-neuronal cells, and the correlation between neuronal cells seems to be less strong than before, but still very consistent.
+
+And the new cluster tree:
+
+```{r}
+cluster.tree.spec <- hclust(as.dist(1-matrix_cor_spec))
+
+
+ggdendrogram(cluster.tree.spec) + ggtitle("Specificity Index, Spearman")
+
+```
+
+Here, appart from the reclustering of OPC, we see that the branch distances are more similar to each other. 
+In this way, we get a better resolution in the clustering between different cell types.
+
+
+# Closing the session
+
+```{r}
+sessionInfo()
+```
+
+

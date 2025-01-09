@@ -1,0 +1,557 @@
+---
+title: "Advanced Computational Systems Biology- scRNAseq"
+output: html_notebook
+---
+
+# Load libraries and data
+
+Libraries:
+
+```{r}
+library(Matrix)
+library(Seurat)
+library(KneeArrower)
+library(tidyverse)
+```
+
+Dataset. Starting with just one batch to not to overload our computers:
+
+```{r}
+mat <- readMM("C:/Users/Lenovo/Desktop/MolBio/2S/Practicals/Simon/Dataset_reduced/counts_s4d1.mtx") #counts
+obs <- read.csv("C:/Users/Lenovo/Desktop/MolBio/2S/Practicals/Simon/Dataset_reduced/obs_s4d1.csv", row.names = 1) #metadata
+var <- read.csv("C:/Users/Lenovo/Desktop/MolBio/2S/Practicals/Simon/Dataset_reduced/var.csv", row.names = 1) #genes id 
+```
+
+We have to make the files match in info:
+
+```{r}
+colnames(mat) <- rownames(var)
+rownames(mat) <- rownames(obs)
+```
+
+
+# Data preprocessing
+
+Sparse matrix. 
+
+```{r}
+umi.per.cell <- colSums(mat)
+umi.per.cell <- sort(umi.per.cell, decreasing = T)
+cumulative.sum <- cumsum(umi.per.cell)
+plot(cumulative.sum, type = "l")
+```
+
+They seem to be already cleaned up.
+
+
+# Create the Seurat Object
+
+We have to transpose the counts because the stats package is done for reverse position of genes vs samples:
+
+```{r}
+seu <- CreateSeuratObject(
+  t(mat),
+  meta.data = obs[,c("cell_type", "batch", "Samplename", "DonorNumber")]
+)
+```
+
+## Further QC metrics
+
+```{r}
+VlnPlot(seu, features = c("nFeature_RNA", "nCount_RNA"), ncol = 3, pt.size = 0.1)
+```
+
+```{r}
+summary(seu$nFeature_RNA)
+summary(seu$nCount_RNA)
+```
+
+They also seem to be processed in this way.
+
+# Data analysis
+
+## Normalization
+
+```{r}
+seu <- NormalizeData(seu)
+```
+
+
+## Find Variable Features
+
+```{r}
+seu <- FindVariableFeatures(seu)
+```
+
+
+## Scaling
+
+```{r}
+seu <- ScaleData(seu)
+```
+
+
+## PCA 
+
+Linear dimensionality reduction --> weighted sum --> linear combination of the previous dimensions (all genes) to describe more easily our data variability.
+
+```{r}
+seu <- RunPCA(seu, ndims = 50)
+```
+
+
+```{r}
+ElbowPlot(seu, ndims = 50)
+```
+
+
+## UMAP
+
+Non-linear dimensionality reduction. Keep the 20 first dimensions:
+
+```{r}
+seu <- RunUMAP(seu, dims = 1:20)
+```
+
+
+### Plotting
+
+UMAPPlot function or FeaturePlot 
+
+```{r}
+UMAPPlot(seu) + coord_equal()
+```
+
+
+## Clustering
+
+### Find neighbors
+
+```{r}
+seu <- FindNeighbors(seu, dims = 1:20)
+```
+
+
+### Find clusters
+
+```{r}
+seu <- FindClusters(seu, resolution = c(0.1, 0.5, 0.7, 1, 1.5))
+```
+
+#### Plotting
+
+```{r}
+SetIdent(seu, value = "orig.ident")
+DimPlot(seu, group.by = "RNA_snn_res.0.1", label = TRUE)
+```
+
+```{r}
+DimPlot(seu, group.by = "RNA_snn_res.0.5", label = TRUE)
+```
+```{r}
+DimPlot(seu, group.by = "RNA_snn_res.1.5", label = TRUE)
+```
+
+### See the difference with cell types (cheat a bit hehe)
+
+```{r}
+DimPlot(seu, group.by = "cell_type", label = TRUE)
+```
+
+```{r}
+FindMarkers(seu, ident.1 = c(0,1,4))
+```
+
+## Anotating cell types
+
+
+
+```{r}
+FeaturePlot(seu, "CD3E")
+```
+
+
+```{r}
+seu@meta.data
+```
+
+Show the counts of a housekeeping gene:
+
+```{r}
+seu@assays$RNA@counts["ACTB", 1:30]
+```
+
+### Double check the normalization
+
+Equation: 
+
+y = log (k/s·10^4 + 1) / 
+  k = seu@assays$RNA@counts(counts)
+  y = seu@assays$RNA@data (output)
+  s = seu@meta.data$nCount_RNA 
+
+```{r}
+plot(colSums(seu@assays$RNA@counts), seu@meta.data$nCount_RNA)
+```
+
+This line indicates that is ok (?)
+
+And for the housekeeping gene. Normalize it applying the previous equation with the housekeeping gene expression to see if it worked. We add (+1) inside the log so that, if a count is 0 (what is very often), we get log(1)=0 and not log(0)=-inf.
+
+```{r}
+plot(log(seu@assays$RNA@counts["ACTB",]/seu@meta.data$nCount_RNA * 1e4 + 1), seu@assays$RNA@counts["ACTB",])
+```
+
+But this +1 add a big bias to the results, mainly separating cells that express and do not express it, and for genes with lower counts (?).
+
+See the counts in histogram. (!) I DID NOT FOLLOW THAT PART AND COULD NOT COPY IT ALL CORRECTLY (!): 
+
+```{r}
+hist(log10(seu@meta.data$nCount_RNA), 100) #weird done
+
+hist(seu@assays$RNA@counts["ACTB",]) #weird done
+
+plot(seu@meta.data$nCount_RNA, seu@assays$RNA@data["ACTB",], + rnorm(nrow(mat), 0, 0.1), log = "x", pch = ".")
+```
+
+### What is the average expression (on the log scale) of ACTB in the cells of Cluster 3 ?
+
+Set the seed first for us all to have the same results (and rerun the analysis quickly):
+
+```{r}
+set.seed(12345678)
+seu <- RunUMAP(seu, dims = 1:20)
+seu <- FindNeighbors(seu, dims = 1:20)
+seu <- FindClusters(seu, resolution = 0.5)
+
+UMAPPlot(seu, label=T)
+```
+
+Which genes are in cluster 3 and get the mean for ACTB gene:
+
+```{r}
+logic_cluster3 <- seu@meta.data$seurat_clusters == 3 #Gives back a logic matrix with T for all cells that have been clustered to cluster 3 by UMAP --> can be used afterwards for subsetting
+
+#seu@assays$RNA@data["ACTB",logic_cluster3]
+# With that line, we get the wor for ACTB and all columns from cluster 3
+
+mean(seu@assays$RNA@data["ACTB",logic_cluster3]) #Mean of all columns for cluster 3 for row "gene ACTB" 
+```
+
+Now we get the mean of all rows(all genes), but only the column for genes in cluster 3:
+
+```{r}
+rowMeans(seu@assays$RNA@data[, logic_cluster3]) #mean gene expression of all genes for cluster 3 
+```
+
+A function to get the fene means for a cluster:
+
+```{r}
+gene_means_for_cluster <- function(cl){
+  w <- seu@meta.data$seurat_clusters == cl
+  rowMeans(seu@assays$RNA@data[,w])
+}
+```
+
+Now we can call it for all clusters for a gene of interest:
+
+```{r}
+gene_means_for_cluster(3)["ACTB"]
+```
+
+Do it for all clusters. For that, we use sapply, which calls the function for all clusters. It saves it in a matrix, getting the average gene expression of each gene for each cluster:
+
+```{r}
+gene_means <- sapply(0:14, gene_means_for_cluster)
+gene_means[1:5, 1:5]
+```
+
+Now we can extract directly from this matrix the mean gene expression for ACTB in cluster 3:
+
+```{r}
+gene_means["ACTB",4] #VERY IMPORTANT, WE HAVE TO SELECT THE COLUMN 4 BECAUSE THE INDEXING OF COLUMNS START AT 1 BUT OUR FIRST CLUSTER IS 0, SO CLUSTER 3 CORRESPONDS TO COLUMN 4
+```
+(!) VERY IMPORTANT THE NOTE OF THE PREVIOUS CHUNK (!)
+
+Consequently, we have to change the col names beforehand:
+
+```{r}
+colnames(gene_means) = sprintf("CL_%02d", 0:14) #function string print formatting for putting the number of the clusters (not need to understand)
+
+gene_means[1:5, 1:5]
+```
+
+So now we can:
+
+```{r}
+gene_means["ACTB","CL_03"]
+```
+
+```{r}
+gene_means["ACTB",4] == gene_means["ACTB","CL_03"]
+```
+
+## Find genes that differ a lot from cluster to cluster
+
+Calculate the SD/variance of the mean matrix:
+
+```{r}
+library(matrixStats)
+
+gene_vars_accorss_clusters <- rowVars(gene_means, useNames = T) #useNames to not to lose them after the analysis
+```
+
+Now we want to keep the top 20 most differentially expressed genes:
+
+```{r}
+interesting_genes <- names(sort(gene_vars_accorss_clusters, decreasing = T)[1:20])
+```
+
+Subset the matrix with gene means:
+
+```{r}
+heatmap(gene_means[interesting_genes,])
+```
+
+We see our sample separated in 4 clusters.
+
+For 100 genes:
+
+```{r}
+interesting_genes <- names(sort(gene_vars_accorss_clusters, decreasing = T)[1:50])
+
+heatmap(gene_means[interesting_genes,])
+```
+
+
+```{r}
+#centered_gene_means <- rowMeans(gene_means[interesting_genes,] - rowMeans(gene_means[interesting_genes,]))
+centered_gene_means <- gene_means - rowMeans(gene_means)
+
+heatmap(centered_gene_means[interesting_genes,], 
+        scale = "none", 
+        zlim = c(-4,4), 
+        col = colorRampPalette(c("blue", "grey", "red"))(100)) #Red for high, blue for low
+```
+
+We can see that clusters 5, 6 and 14 share some profile --> CD36 --> look for literature to see which follow the profile. 
+
+```{r}
+UMAPPlot(seu, label =T)
+```
+
+We can guess that 5 and 6 are the progenitors and the 14 are the mature ones that are being pushed out from the bone marrow (this needs further study).
+
+We can also ask ChatGPT (and contrast afterwards, of course), e.g., give me gene markerts that separate the myeloid and lymphoid lines in bone marrow. Create a vector with our interesting genes and test them:
+
+```{r}
+lymphoid_genes <- c("CD19", "CD3G", "CD3E", "MS4A1", "PAX5", "CD79B")
+```
+
+Clusters 3,7,9,10 --> LYMPHOID
+Clusters
+
+Do same with myeloid.
+
+And we can also look for individual genes in plots:
+
+```{r}
+FeaturePlot(seu, "CD33", label = T)
+```
+
+It is expressed in cluster 2, 12, etc. but still not very expressed --> not very well seen in the Feature plot but better with means or violin plot:
+
+```{r}
+VlnPlot(seu, "CD33") 
+```
+
+We do not see much because it is a not very expressed gene, but it is important. Maybe we could remove the 0 to see the actual distribution (not done here):
+
+Here with means. It is expressed in few cells but very high so increases the mean:
+
+```{r}
+plot(gene_means["CD33",])
+```
+
+We can try with other gene to see a better example:
+
+```{r}
+FeaturePlot(seu, "PAX5", label = T)
+VlnPlot(seu, "PAX5")
+plot(gene_means["PAX5",])
+```
+Caracteristic of clusters 3,7,9,10 --> from the lymphoid line.
+
+This analysis lasts several days to properly anotate cell types. Checking again against the real anotations of the dataset:
+
+```{r}
+UMAPPlot(seu, group.by = "cell_type", label = T)
+```
+
+To interact with the UMAP space --> we can see the direct relation (distances) of each cell with the surrounding ones: 
+
+```{r}
+sleepwalk::sleepwalk(seu@reductions$umap@cell.embeddings, seu@reductions$pca@cell.embeddings)
+```
+
+Batch effect:
+
+What is larger in our sample?
+- Two different cells types of the same donor
+- Same cell type of different donor (this should differ less) --> But also depending on the donors (samples) --> healthy vs sick
+
+Clusters with different subgroups can be the different patients, or activated/deactivated immune cells, progenitors and intermediate developmental states, etc.
+
+When the patients are more different (batch effect), the clusters are more elongated in shape and the algorithm can identify them as different clusters.
+
+Integration methods. 
+
+
+
+Are clusters representing real cell types or different donors/batches? --> look for batch effect. 
+
+We can group.by = "batch" and compare with the clusters obtained before. Maybe in different clusters, the batch representation can be even or the cluster can represent each different batch --> it has to be corrected. 
+
+After properly labelling, we can see the differentiation (development) of bone marrow cells. 
+
+Which genes are absolutely representative and which ones change from person to person?
+
+
+# Compare different clusters
+
+Compare the T cell CD8 and CD4 (both naive and activated) --> corresponding to clusters 4 and 1 respectively.
+
+
+
+```{r}
+CD8_cells <- seu@meta.data$cell_type == "CD8+ T" #I could have used seu@meta.data$seurat_clusters == 4 (and 1 for CD4)
+CD4_cells <- seu@meta.data$cell_type == c("CD4+ T activated", "CD4+ T naive")
+```
+
+
+```{r}
+mean_gene_exp_CD8 <- rowMeans(seu@assays$RNA@data[,CD8_cells])
+mean_gene_exp_CD4 <- rowMeans(seu@assays$RNA@data[,CD4_cells])
+```
+
+```{r}
+plot(mean_gene_exp_CD4, mean_gene_exp_CD8, asp =1) 
+```
+
+Another way of plotting it. It is how far I am from the diagonal (diagonal above as x axis). Should be the same plot as before:
+
+```{r}
+plot(mean_gene_exp_CD4+mean_gene_exp_CD8/2, mean_gene_exp_CD4 - mean_gene_exp_CD8, cex = 0.3)
+```
+
+Poisson noise --> That is why it gets broader in the middle and then gets thinner again. This effect is greater in low expressed genes. 
+
+```{r}
+identify(plot(mean_gene_exp_CD4+mean_gene_exp_CD8/2, mean_gene_exp_CD4 - mean_gene_exp_CD8, cex = 0.3)) #I don't get wtf is Identify
+```
+
+Sort the difference in mean expression among them and see the ones with higher for CD8 (tail, lower difference when substracting CD4 means --> pos values) and higher differences for CD4 (head, higher difference when substracting CD4 means --> neg):
+
+```{r}
+tail(sort (mean_gene_exp_CD8 - mean_gene_exp_CD4))
+```
+
+```{r}
+head(sort (mean_gene_exp_CD8 - mean_gene_exp_CD4))
+```
+
+The gene AOAH is very different for CD8 --> very interesting --> we can google it.
+INPP4B --> very charasterstic in CD4.
+
+```{r}
+plot(mean_gene_exp_CD8 - mean_gene_exp_CD4, sqrt(var(mean_gene_exp_CD4 + mean_gene_exp_CD8)/2), cex = 0.3) #I didn't get it and it doesn't work for me
+```
+
+```{r}
+t.test(
+  seu@assays$RNA@data[,CD8_cells],
+  seu@assays$RNA@data[,CD4_cells]
+)
+```
+
+We have seen significance but it does not mean much because they were clusters already (?).
+
+
+```{r}
+library(tidyverse)
+
+tibble(
+  cell = rownames(mat),
+  gene_count = mat[,"AOAH"],
+  total = rowSums(mat),
+  cell_type = obs$cell_type,
+  batch = obs$batch,
+  donor = obs$DonorNumber) -> tbl
+```
+
+
+```{r}
+tbl %>%
+  filter(cell_type %in% c("CD4+ T naive", "CD4+ T activated", "CD8+ T")) %>%
+  mutate(simple_cell_type = str_sub(cell_type, 1, 6)) %>%
+  mutate(expr = log(gene_count/total * 1e4 + 1)) %>%
+  group_by(simple_cell_type, donor) %>%
+  summarise(mean(expr), n()) 
+
+pivot_wider(names_from = "simple_cell_type", values_from = "mean(expr)") -> tbl2 #this code line doesn't work, I got lost
+t.test(tbl2$'CD4 +', tbl2$'CD8 +', paired=T) #doesn't work either
+```
+
+
+# ADDITIONAL NOTES
+
+## Poisson
+
+Taking balls from a bag and seeing the number of red balls --> taking mRNA from a cell and seeing which is my mRNA of interest.
+Poisson is an approximation of a Binomial distribution.
+
+k ~ Pois (lambda)
+
+E(k) = lambda; Var(k) = lambda
+SD (k/lambda) = sqr(Var(k/lambda)) = sqr(1/lambda^2[Var(k)]) = 1/sqr(lambda)
+
+When there is a big difference in a given gene expression among cells, the 1st question we have to ask ourselved is if that is real or if that is because the gene is very low expressed --> variance (Poisson) is higher if the gene expression is low than if it is high (the variation is lowered at high counts). Poisson noise!
+
+## Notation in R
+
+For complex objects:
+
+@ for selecting matrices (dfs) in the object.
+$ for selecting columns in matrices.
+
+Basically, we have to alter them and it works
+
+## Taking an average before and after a log transformation
+
+log transformation is a way of getting the number of digits i.e. the order of the numbers.
+
+It is more representative after log. Example:
+
+9x 1000$
+1x 1000000$
+
+Normal mean income: 100900$
+
+Mean after log and then reverse log transform: 
+  9x 3
+  1x 6
+  Mean: 3.3 --> rev log(10) transform --> 2000$ --> more representative
+  
+  
+# Save RDS
+
+```{r}
+saveRDS(seu, "seu_BM_s4d1_1.rds")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+

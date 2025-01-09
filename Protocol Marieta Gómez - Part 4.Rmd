@@ -1,0 +1,158 @@
+---
+title: "Single Cell Course - Protocol Part 4"
+Author: Marieta Gómez Matos
+output:
+  html_document:
+    df_print: paged
+---
+
+# Load library and dataset
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r}
+ple5 <- readRDS("srt_03_ple5.rds")
+```
+
+```{r}
+ple5
+```
+
+```{r}
+DimPlot(ple5, label = T)
+```
+
+# Anotating cell types
+
+## Rename the clusters
+
+We are going to change the names of the clusters to the broad cell types we already identified:
+
+```{r}
+ple5 <- RenameIdents(object=ple5,
+                     "0" = "OBGABA", 
+                     "1" = "EG",
+                     "2" = "TEGLU",
+                     "3" = "TEGLU",
+                     "4" = "TEGABA",
+                     "5" = "OBGABA",
+                     "6" = "TEGABA",
+                     "7" = "non-TE",
+                     "8" = "TEGLU",
+                     "9" = "TEGLU",
+                     "10" = "TEGABA",
+                     "11" = "TEGLU",
+                     "12" = "MG",
+                     "13" = "VC",
+                     "14" = "TEGABA",
+                     "15" = "GAD1.im",
+                     "16" = "OPC",
+                     "17" = "OEC",
+                     "18" = "OB.ImN"
+                     )
+```
+
+
+And plot them again to see how they are distributed:
+
+```{r}
+DimPlot(ple5, label = T)
+```
+
+We can observe a logical distribution of the broad cell types, grouping closer all the neuronal cells, and further the non-neuronal cells. Within the neurons, also the excitatory (GLU) and inhibitory (GABA) are separately distributed, as well as the telencephalic and olfactory bulb neurons. 
+
+## Store the identities (broad cell types) in the metadata
+
+We can create a new column ("broad.cell.types") in the metadata of the Seurat Object:
+
+```{r}
+ple5$broad.cell.types <- as.character(Idents(ple5))
+```
+
+
+```{r}
+head(ple5[[]])
+```
+
+## Visualize the cell counts per broad cell type
+
+```{r}
+data <- as.data.frame(table(ple5$broad.cell.types)) 
+colnames(data) <- c("cell.type", "count")
+
+data[order(data$count, decreasing = TRUE),] %>%
+  ggplot(aes(x = cell.type, y = count, fill = cell.type)) +
+    geom_col() +
+    theme_classic() +
+    geom_text(aes(label = count),
+      position = position_dodge(width = 0.9),
+              vjust = -0.25) +
+    ggtitle("Cells per cell type") +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+As we can see, we have very different number of each cell type, going from 783 in TEGLU to 25 in OEC.
+
+
+# Visualizing the differential gene expression among cell types
+
+## Dot plot
+
+We do a dot plot to visualize the differences in gene expression among cell types. For that, we select the genes of the original paper of our dataset (https://www.science.org/doi/10.1126/science.abp9186):
+
+
+```{r}
+Major_Features <- c("SNAP25","SYT1","RBFOX3","FOXG1","SLC17A7","GAD1",
+                    "SLC17A6","SOX4","SOX9","SOX2","GFAP","PDGFRA",
+                    "NINJ2","COL1A2","PRSS56","C1QB","LCP1")
+
+ple5 <- SetIdent(ple5, value = "broad.cell.types")
+
+DotPlot(ple5, features = Major_Features)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))     
+```
+
+In this plot, the expression of each gene (column) in each cell type (row) is shown by the dot size (percentage of cells expressing given gene) and the color (average expression of the gene). Therefore, the darker the color and the bigger the dot, the higher the overall expression in given cell type.
+
+Reordering the plot:
+
+```{r}
+Idents(ple5) <- factor(Idents(ple5), levels=c("MG","OEC","VC","OPC", "EG","OB.ImN","GAD1.im", "OBGABA","TEGABA","non-TE","TEGLU"))
+
+DotPlot(ple5, features = Major_Features)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))   
+```
+
+Now it seems very close to the dot plot presented in the paper, containing a similar gene expression profile in all cell types.
+
+
+## Heatmap
+
+We can also visually analyze the single-cell gene expression of each cell type using heatmaps:
+
+```{r}
+DoHeatmap(ple5, features = Major_Features, size = 3)
+```
+
+In this plot, each cell type (column) is correlated to each gene (row) using a color code that denotes expression. Within each cell type, each cell is plotted as a thin colored line. However, since the number of cells per cell type is very variable, the results cannot be properly seen for the small clusters. Thus, we can also select a random subset of each major cell type, so that the difference in gene expression levels can be better compared:
+
+```{r}
+DoHeatmap(subset(ple5, downsample=50), features = Major_Features, size =3)
+```
+
+This result is similar (and complementary) to the one of the dotplot. However, although the heatmap is not as schematic as the dotplot, the color code used can help us better distinguishing between the different expression levels, specially regarding the lowest ones.
+
+# Saving the Seurat Object and  Closing the Session
+
+```{r}
+saveRDS(ple5, "srt_04_ple5.rds")
+```
+
+```{r}
+sessionInfo()
+```

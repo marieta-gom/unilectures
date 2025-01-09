@@ -1,0 +1,468 @@
+---
+title: "Single Cell Course - Protocol Part 5"
+Author: Marieta Gómez Matos
+output: html_notebook
+---
+
+#Study the correlation among clusters
+
+## Load libraries
+
+```{r setup}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stats)
+library(pheatmap)
+library(ggdendro)
+library(DESeq2)
+```
+
+We set the seed at 42 (as a random number) to make sure that all the random analysis start at the same point for all analysis:
+
+```{r}
+set.seed(42)
+```
+
+## Clean the enviroment
+
+```{r}
+rm(list = ls())
+gc()
+```
+
+## Load dataset
+
+```{r}
+ple5 <- readRDS("srt_04_ple5.rds")
+```
+
+
+```{r}
+DimPlot(ple5, label = TRUE)
+```
+
+## Downsizing clusters
+
+Since cluster size is very variable as we previously observed, we have to create a subset of each of them to make them comparable:
+
+```{r}
+ple5.small <- subset(ple5, downsample = 40)
+```
+
+We can now visualize the more homogeneous cell number after random subsetting them:
+
+```{r}
+data <- as.data.frame(table(ple5.small$broad.cell.types)) 
+colnames(data) <- c("cell.type", "count")
+
+data[order(data$count, decreasing = TRUE),] %>%
+  ggplot(aes(x = cell.type, y = count, fill = cell.type)) +
+    geom_col() +
+    theme_classic() +
+    geom_text(aes(label = count),
+      position = position_dodge(width = 0.9),
+              vjust = -0.25) +
+    ggtitle("Cells per cell type") +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+And their distribution in the DimPlot: 
+
+```{r}
+DimPlot(ple5.small)
+```
+## Pseudo-bulk analysis
+
+Now that we have properly identified the clusters, we can study their relationship following their gene expression profiles. For that, we have to calculate distances between clusters and then see how close (related) is each cell type with respect to the others. 
+
+### Calculate the average expression of the different cell types
+
+We will create a new Seurat Object using the subsets with the average gene expression for each cell type in order to reduce the effect of dropouts as well as the bias in highly expressed genes:
+
+```{r}
+ple5_avg <- AverageExpression(object = ple5.small, return.seurat = TRUE)
+```
+
+```{r}
+ple5_avg
+```
+### Count matrix calculation
+
+We create then a matrix with the previously calculated average data. We get an average gene expression of each cell type for each gene:
+
+```{r}
+ple5_avg_mtx <- as.data.frame(ple5_avg@assays[["RNA"]]@counts)
+
+head(ple5_avg_mtx)
+```
+
+This table is called pseudo-bulk count table.
+
+### Correlation calculation
+
+Now we calculate a matrix containing the pairwise correlation coefficients (using the Spearman correlation) between cell types for all average gene expression. This correlation corresponds to the relative distance of each cluster with respect to the others. Moreover, it is important to underline that, for this analysis, the distances calculated by non-linear dimensionality reduction methods (e.g., UMAP or t-SNE) cannot be used, since, as we explained in Part 2, those distances are not meaningful anymore.
+
+```{r}
+matrix_cor_avg <- cor(as.matrix(ple5_avg_mtx), method = "spearman")
+
+matrix_cor_avg[1:5, 1:5]
+```
+
+As we can see, since the correlation to itself is 1, the diagonal of the matrix is 1.
+
+We can visualize the results with a heatmap:
+
+```{r}
+heatmap <- pheatmap(matrix_cor_avg, main = "Average Expression, Spearman",
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "none",
+                    treeheight_row = 0,
+                    treeheight_col = 40,
+                    fontsize_row = 7,
+                    display_numbers = FALSE)
+```
+
+We can see a very strong correlation in all the neurons (as expected).
+
+Another way to analyze it is using a cluster tree:
+
+```{r}
+cluster.tree.avg <- hclust(as.dist(1 - matrix_cor_avg))
+```
+
+And visualize it using a dendrogram:
+
+```{r}
+ggdendrogram(cluster.tree.avg) + ggtitle("Average Expression, Spearman")
+```
+
+In this way, we can see how related the cell types are, since the different cell types are clustered following their relative gene expression profiles. As in the heatmap, all the neurons are clustered together, although the OPC are grouped together with them. We can also do a bootstrapping to see how often they are cluster together and add some statistics to the analysis.
+
+However, we do not know if this clustering is caused because the neuronal cells are very conserved or because there is a very high gene expression that triggers that grouping (losing the impact of differentially expressed genes in low levels). Therefore, we can visualize the overall gene expression (RNA counts) per cell type using the box and whisker plot, and compare it to the number of genes that they express (using the same type of plot):
+
+
+```{r}
+ple5.small@meta.data %>%
+  ggplot(aes(x=nCount_RNA, fill=broad.cell.types)) +
+  geom_boxplot(alpha = 0.2) +
+  theme_classic() + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("Counts per Cell")
+```
+
+```{r}
+ ple5.small@meta.data %>%
+  ggplot(aes(x=nFeature_RNA, fill=broad.cell.types)) +
+  geom_boxplot(alpha = 0.2) +
+  theme_classic() + 
+  theme(axis.text.y = element_blank()) +
+  ggtitle("Genes per Cell")
+
+```
+
+As we can see, there is a difference between amount of overall expression (RNA count/cell) and amount of genes per cell type. That can introduce bias to our results. Therefore, we can perform the same analysis but calculating an specificity index for each gene in each cell type so that we can relativize its gene expression to the overall gene expression average.
+
+## Specificity index
+
+### Preprocessing of the matrix
+
+First, we need to add a column with the gene name: 
+
+```{r}
+ple5_avg_mtx <- dplyr::mutate(ple5_avg_mtx, "gene" = rownames(ple5_avg_mtx))
+
+ple5_avg_mtx
+```
+
+Then we rearrange the previous matrix into a long format (table-like dataframe):
+
+```{r}
+ple5_spec <- tidyr::gather(ple5_avg_mtx, key = "cell.type", value = "avg_expression", -gene)
+
+head(ple5_spec)
+```
+
+In this way, each gene appears each time for each cell type. Now we can group by gene:
+
+```{r}
+ple5_spec <- ple5_spec %>%
+  group_by(gene)
+```
+
+And remove all genes with an average expression of 0 for all cell types (it gives an error, since we cannot divide by 0 when performing the average):
+
+```{r}
+ple5_spec <- dplyr::filter(ple5_spec, sum(avg_expression) > 0)
+```
+
+In other words, we kept just the genes whose sum of avg_expr is positive.
+
+### Calculating the specificity index
+
+Now we create another column with the mean (average) of the overall expression of each gene across all cell types:
+
+```{r}
+ple5_spec <- dplyr::mutate(ple5_spec, "avg_total" = mean(avg_expression))
+
+head(ple5_spec)
+```
+
+Ungroup the data:
+
+```{r}
+ple5_spec <- ungroup(ple5_spec)
+```
+
+And now we calculate the specificity index by dividing the average expression of each gene in each cell type by the average expression of each gene in total (across all cell types):
+
+```{r}
+ple5_spec <- dplyr::mutate(ple5_spec, "spec_index" = avg_expression/avg_total)
+
+head(ple5_spec)
+```
+
+We get rid of the columns we are not interested in:
+
+```{r}
+ple5_spec_final <- dplyr::select(ple5_spec, -avg_expression, -avg_total)
+
+head(ple5_spec_final)
+```
+
+And now we go back again to the wide format (matrix-like dataframe):
+
+```{r}
+ple5_spec_final <- tidyr::spread(ple5_spec_final, cell.type, spec_index, fill = 0)
+
+head(ple5_spec_final)
+```
+
+And we have to transform it again into a dataframe format (the previous format, tibble, is another form of dataframe used by the tidyr package):
+
+```{r}
+ple5_spec_final <- as.data.frame(ple5_spec_final)
+
+head(ple5_spec_final)
+```
+
+Change the column name by the gene name again:
+
+```{r}
+rownames(ple5_spec_final) <- ple5_spec_final$gene
+
+head(ple5_spec_final)
+```
+
+And, finally, we eliminate the column we created with the gene names:
+
+```{r}
+ple5_spec_final <- dplyr::select(ple5_spec_final, -gene)
+
+head(ple5_spec_final)
+```
+
+At the end we have a data frame with the specificity indexes instead of gene expression.
+
+### Correlation with the specificity indexes
+
+Now we repeat the previous pairwise correlation analysis using the specificity indexes instead of the average gene expression:
+
+```{r}
+matrix_cor_spec <- cor(as.matrix(ple5_spec_final), method = "spearman")
+
+matrix_cor_spec[1:5, 1:5]
+```
+
+Then make the new heatmap:
+
+```{r}
+heatmap <- pheatmap(matrix_cor_spec, main = "Average Expression, Spearman",
+                    cluster_rows = TRUE,
+                    cluster_cols = TRUE,
+                    scale = "none",
+                    treeheight_row = 0,
+                    treeheight_col = 40,
+                    fontsize_row = 7,
+                    display_numbers = FALSE)
+```
+
+And the new cluster tree:
+
+```{r}
+cluster.tree.spec <- hclust(as.dist(1-matrix_cor_spec))
+
+
+ggdendrogram(cluster.tree.spec) + ggtitle("Specificity Index, Spearman")
+
+```
+
+This time, we get a slightly different result, since the OPC are clustered now together with the non-neuronal cells, and the branch distances are now more similar to each other. 
+In this way, we get a better resolution in the clustering between different cell types.
+
+# Differential Expression Analysis with DESeq2
+
+The Wilcoxon test - used on Part 3 to find differentially expressed genes - considers each cell as an individual observation. Therefore, the test does not consider the variability between replicates (different replicates can follow slightly different behaviours due to the batch effect), displaying a tendency to underestimate the variance in gene expression. This causes a bias towards highly expressed genes and, thus, an increase in the false positives.
+
+Consequently, in order to eliminate this phenomenon, we can use the pseudo-bulk analysis, since it consider group of cells (replicate variability) rather than indv cells.
+
+## Clean the enviroment 
+
+```{r}
+rm(list = ls())
+gc()
+```
+
+## Load libraries
+
+```{r setup}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stats)
+library(pheatmap)
+library(ggdendro)
+library(DESeq2)
+```
+
+## Load the dataset
+
+```{r}
+ple5 <- readRDS("srt_04_ple5.rds")
+
+DimPlot(ple5, label = T)
+```
+
+## Preprocessing of the data
+
+We need to generate again the matrix containing the average gene expression in different cell types:
+
+```{r}
+ple5_avg <- AverageExpression(ple5, return.seurat = TRUE)
+
+ple5_avg
+```
+We extract the counts of the dataset in a matrix:
+
+```{r}
+counts <- as.matrix(ple5_avg@assays[["RNA"]]@counts)
+
+counts[1:5, 1:5]
+```
+
+Now we round the results to have integer for the DESeq2 to process them: 
+
+```{r}
+counts <- round(counts)
+
+counts[1:5,]
+```
+
+And we create a subset with only the mature neuron counts (columns 1,2,4,5):
+
+```{r}
+neuron.counts <- counts[, 1:5] 
+neuron.counts <- neuron.counts[,-3]
+
+head(neuron.counts)
+```
+
+## Create the metadata frame
+
+First, we add another column grouping the same general neuronal types:
+
+```{r}
+coldata <- data.frame("cell.type" = colnames(neuron.counts), "broad.cell.type" = c("GABA","GLUT", "GABA","GABA"))
+```
+
+(?) IS NON-TE GABA? BECAUSE IN THE SCRIPT IS GLUT BUT FOR ME IT'S MORE GABA-LIKE. IT AFFECTS ALL THE FOLLOWING ANALYSIS (?)
+
+We put the name of the cells in the columns:
+
+```{r}
+rownames(coldata) <- coldata$cell.type
+
+head(coldata)
+```
+
+The names of the rows in the coldata and the columns in the neuron.counts should be the same for the analysis to work:
+
+```{r}
+all(rownames(coldata) == colnames(neuron.counts))
+```
+
+## Create the DESeq Object
+
+We transform the matrix into a DESeq Object:
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = neuron.counts, colData = coldata, design = ~ broad.cell.type)
+
+dds
+```
+And run the analysis: 
+
+```{r}
+dds <- DESeq(dds)
+```
+
+This algorithm can only compare genes that are present in all gene types that we are using. 
+The warning says that our data are not well suited for this analysis (not well comparable).
+
+We store the results:
+
+```{r}
+res <- results(dds)
+
+summary(res)
+```
+
+Now, we transform the results into a dataframe:
+
+```{r}
+res.df <- as.data.frame(res)
+
+head(res.df)
+```
+
+Sort the dataframe by p-value:
+
+```{r}
+res.df <- dplyr::arrange(res.df, pvalue)
+
+head(res.df)
+```
+
+And we can have a look to counts of the first differentially expressed genes sorted by the broad cell type:
+
+```{r}
+plotCounts(dds, gene="NPTXR", intgroup="broad.cell.type")
+plotCounts(dds, gene="GAD2", intgroup="broad.cell.type")
+plotCounts(dds, gene="SLC17A7", intgroup="broad.cell.type")
+```
+
+Or to the 20 most differentially expressed genes in a heatmap:
+
+```{r}
+top20 <- row.names(res.df)[1:20]
+```
+
+```{r}
+df <- as.data.frame(colData(dds)[,c("broad.cell.type","cell.type")])
+
+pheatmap(assay(dds)[top20,], cluster_rows = FALSE, cluster_cols = FALSE,
+         show_rownames = TRUE, annotation_col = df, scale="row")
+```
+
+Here, we do not see such a great difference in expression as in the previous analysis. However, it is not suprising, since DESeq2 is used for comparing and integrating different types of data (replicates, different animals, developmental stages, etc.) rather than comparing data within the same sample.
+
+# Closing the session
+
+```{r}
+sessionInfo()
+```
+
+

@@ -1,0 +1,284 @@
+---
+title: "Single Cell Course - Protocol Part 1"
+Author: Marieta Gómez Matos
+output:
+  html_document:
+    df_print: paged
+---
+
+# Introduction 
+
+  The Iberian ribbed newt (Pleurodeles waltl) is a salamandrid original from the Iberian Peninsula. As a member of this family, P. waltl is able to regenerate many different tissues during its adult phase --including damaged neuronal tissue--, what seems to be related to their considerably long lifespan (Yun, 2021). Consequently, P. waltl is emerging as a new model organism to study development and regeneration. The Iberian ribbed newt is additionally characterized by having a very large genome (around 20 GB) and by displaying complex social behaviours (Janssenswillen & Bossuyt, 2016). Therefore, studying P. waltl brain and its regeneration has aroused the interest of the scientific community, since their brain, in spite of the phylogenetic distance, shares some similarities with mammals brains (Joven & Simon, 2018). In the brain, the telencephalon is the region responsible for the sensory information processing, emotions, learning, and memory among others, which makes it an interesting region to study. However, the lack of published information on P. waltl hinders the analysis of experiments, making the publication of more information within the databases and available resources urgent (Matsunami et al., 2019).
+  Since tissues are formed by different cell types, doing a standard RNA-seq of brain tissue provides an average value of the different gene expression in each cell type. However, by using scRNA-seq, we can separate independent cells using microfluidics and later analyze their individual gene expression. After identifying and clustering them in the different cell types, more precise analysis can be performed.
+  In this practical, we have analyzed single-cell RNA sequencing (scRNA-seq) data from P. waltl telencephalic tissue extracted from Woych et al., (2022) to identify the different cell types contained within the sample and to study their correlation.
+
+
+# Load packages
+
+```{r}
+library(Matrix)
+library(Seurat)
+library(KneeArrower)
+```
+
+# Load dataset
+
+We load the RNA dataset (matrix) with their corresponding column name (barcodes, different droplets corresponding to the different putative cells) and the name of the rows (features, corresponding to the detected genes):
+
+```{r}
+parent.dir <- "Dataset/"
+
+mat <- readMM(paste0(parent.dir, "matrix.mtx"))
+barcodes <- read.csv(paste0(parent.dir, "barcodes.tsv"), header = F)[[1]]
+genes <- read.csv(paste0(parent.dir, "features.tsv"), header = F)[[1]]
+
+colnames(mat) <- barcodes
+rownames(mat) <- genes
+```
+
+
+We can have a look to the dimension of our matrix:
+
+```{r}
+dim(mat)
+```
+
+```{r}
+mat[1:5, 1:5]
+```
+
+Looking to the first 5 rows and 5 columns, we see that there are too many zeros. In other words, our data are very sparse and they are stored in a sparse-specific format to save space, since all 0 are replaced by ".". 
+
+We can calculate the proportion of values that are different than zero:
+
+```{r}
+sum(mat != 0) / (sum(mat == 0) + sum(mat != 0))
+```
+As we can see, only the 0.8% of our matrix contain values different to zero. Therefore, we have to do some preprocessing steps to screen our data before starting analyzing them.
+
+# Identify valid droplets
+
+## Knee-point plot
+
+### Creating the knee-point plot
+
+To further understand our data, we perform an analysis of the columns (barcodes corresponding to putative cells, as previosly explained) and see the number of reads (different UMIs, specific sequence in each oligo of each bead) in each of them:
+
+```{r}
+umi.per.cell <- colSums(mat)
+summary(umi.per.cell)
+```
+As we can see, the data are considerably shifted to lower values, since the mean read number (gene expression) is 409.3 but the median is just 58.0. That confirms that there are many empty droplets with very low reads, as we previously observed. Additionally, this low expression is caused by ambient RNA, i.e. free RNA released after cell lysis in the sample. This information is also useful for correcting background noise later, as valid droplets (containing a cell) will also contain ambient RNA apart from the cell-specific RNA. 
+
+To eliminate empty droplets, we have to sort the barcodes following decreasing gene expression, and then sum them up for performing the knee-point plot:
+
+```{r}
+umi.per.cell <- sort(umi.per.cell, decreasing = T)
+head(umi.per.cell)
+```
+
+Now we calculate the cumulative sum of the values for plotting the knee-point plot:
+
+```{r}
+cumulative.sum <- cumsum(umi.per.cell)
+head(cumulative.sum)
+```
+We can see now that the cumulative.sum is the sum of the values of umi.per.cell in a sequential manner (each value is the result of its sum with all the previous ones).
+
+Now, we plot it. We add the "l" to display it as a line, preventing it to plot every point as a dot.
+
+```{r}
+plot(cumulative.sum, type = "l")
+```
+
+This plot shows the cumulative sum of all the gene expression values ordered decreasingly (x axis = number of barcodes/droplets ordered by decreasing UMI count; y axis = cumulative sum of UMIs). The knee-point is the point at which the gene expression signal of the newly-added decreasingly-ordered droplets is so low, that it adds too little to the overall sum, displaying a plateau phase. This corresponds to the empty droplets and, consequently, we want to get rid of them to reduce the size of the dataset we are handling.
+
+To better determine the knee-point region, we can zoom in the approximate region it should be. The first 10000 results will be plotted:
+
+```{r}
+plot(cumulative.sum[1:10000], type = "l")
+```
+
+We can see we have around 2500 real single cells sequenced from 1e+5 barcodes. 
+
+To get the knee-point in a more precise way, we can use the findCutoff function:
+
+```{r}
+knee <- findCutoff(
+  2000:5000,
+  cumulative.sum[2000:5000],
+  method ="first",
+  frac.of.steepest.slope = 0.1
+)
+```
+
+We have restricted the findCutoff function to a narrow range (from 2000 to 5000), where the knee-point should be. This function determines the cutoff point of the curve based on its slope, using the frac.of.steepest.slope argument to indicate at which value it is not steep enough to consider that the plot is still increasing (i.e. we reached the plateau phase).We chose 0.1 so that we make sure the increase is almost stopped. 
+
+The x value indicates the approximate number of real cells that have been analyzed and the y is the overall sum of gene expression at the knee-point:
+
+```{r}
+knee
+```
+
+Since this number is a float, and cells are counted as integers, we round the x value:
+
+```{r}
+ceiling(knee$x)
+```
+And then we plot it together with the graph:
+
+```{r}
+plot(cumulative.sum[1:10000], type = "l")
+abline(v = ceiling(knee$x), col = "red")
+```
+
+Again, we can see here that the slope chosen (0.1) is low enough to allow some of the initial plateau phase to be considered as non-empty droplets. Only when the addition of expression to the cumulative sum is really low, the droplets are discarded.
+
+### Creating a subset of the matrix
+
+Once we have defined the limit between empty and non-empty droplets, we have to subset our data to keep only all those putative real cells. For that, we save all the columns before the knee-point in the descending ordered matrix:
+
+```{r}
+sub.mat <- mat[, names(cumulative.sum[1:ceiling(knee$x)])]
+dim(sub.mat)
+```
+As we see now, we have as many columns as the previously calculated "knee" value after rounding.
+
+Save the filtered dataset in a file:
+
+```{r}
+out.name <- "Pleurodeles_filtered"
+
+if(!dir.exists(out.name)) {
+  dir.create(out.name)
+}
+
+writeMM(sub.mat, paste0(out.name, "/matrix.mtx"))
+write(colnames(sub.mat), paste0(out.name, "/barcodes.tsv"))
+write(rownames(sub.mat), paste0(out.name, "/features.tsv"))
+```
+
+# The Seurat Object
+
+## Creating the Seurat Object
+
+Once we have our filtered dataset, we convert it into a Seurat object so that we can analyze it using the functions contained in the Seurat package. 
+
+```{r}
+library(patchwork)
+
+ple5 <- CreateSeuratObject(
+  counts = sub.mat,
+  project = "Pleurodeles E5",
+  min.cells = 3,
+  min.features = 200
+)
+```
+
+The argument "min.cells" allows us to consider only features (genes) that appear at least the indicated number of times (i.e., in this case, at least in 3 cells). In this way, we eliminate spurious genes whose presence is not significant or is questionable. On the other hand, the argument "min.features" allows us to include only the barcodes (cells) that have at least a given number of features (genes), eliminating the ones that can have suspiciously low gene expression (and, therefore, may not be a cell).
+
+If we see the created Seurat object, it indicates the number of genes and cells that are contained in it:
+
+```{r}
+ple5
+```
+
+We can also have a look to the metadata of the Seurat Object. The rows are the barcodes (cells) and the columns are additional information about the dataset:
+
+```{r}
+head(ple5@meta.data)
+```
+
+Here, we can see the origin of the sample (Pleurodeles), the number of counts (number of different UMIs, i.e. number of total reads per bead) and number of features (number of different genes per bead).
+
+## More quality control metrics
+
+In spite of the removal of empty droplets, we cannot ensure that all the barcodes contain real, high-quality cells. Therefore, we can take a look to some additional metrics to select barcodes that contain real cells. 
+
+For that, we can look for some mitochondrial genes to make sure that they are contained in the barcodes. That can be an indication of the presence of a real cell in the droplet, since it is difficult to find mitochondrial RNA in empty droplets containing residual RNA coming from lysed cells.
+Thus, we create a string vector containing the name of 9 mitochondrial genes (mitochondrial_genes_salamander) and calculate another column within the metadata of the ple5 Seurat Object:
+
+```{r}
+mitochondrial_genes_salamander <- c(
+  "ND1", "ND4L","ND5","ND6","COX1","COX2","COX3","CYTB","ATP6"
+)
+
+ple5[["percent_mito"]] <- PercentageFeatureSet(
+  ple5,
+  features = mitochondrial_genes_salamander
+)
+
+ple5@meta.data
+```
+
+The function "PercentageFeutureSet" calculates the percentage of counts of each barcode that corresponds to the selected features. In other words, we are calculating the percentage of those 9 mitochondrial genes in the total count of each barcode, what we will later use as a proxi of real cell.
+
+Once we have calculated it, we can do a violin plot showing the three numerical metrics in the metadata:
+
+```{r}
+VlnPlot(ple5, features = c(
+  "nFeature_RNA", "nCount_RNA", "percent_mito"
+), ncol = 3, pt.size = 0.1)
+```
+
+In this graph, every point corresponds to a barcode. Thus, we can see the how the putative cells are distributed (red shadow corresponds to the distribution density) according to their number of features (genes), counts (reads) and the previously calculated mitochondrial gene percentage. 
+
+Looking at the distribution, we can define upper and lower cutoffs for each parameter in order to remove the outliers, which probably would contain, for example, ambiental RNA or multiple cells (doublets).
+
+We can have a closer look to the distribution details to choose better the cutoff values:
+
+```{r}
+summary(ple5$nFeature_RNA)
+summary(ple5$nCount_RNA)
+summary(ple5$percent_mito)
+```
+
+In this way, we decide to consider as viable cells the barcodes whose:
+  Number of genes are higher than 500.
+  Gene expression is between 500 and 30000 counts.
+  Have a mitochondrial RNA percentage lower than 3%.
+
+```{r}
+ple5 <- subset(ple5,
+               subset = nFeature_RNA > 500 &
+                 nCount_RNA > 500 &
+                 nCount_RNA < 30000 &
+                 percent_mito < 3)
+```
+
+If we replot the violin plot using the new subset, we see a more distributed dataset, since the outliers are removed:
+
+```{r}
+VlnPlot(ple5, features = c(
+  "nFeature_RNA", "nCount_RNA", "percent_mito"
+), ncol = 3, pt.size = 0.1)
+```
+
+# Saving the Seurat Object and  Closing the Session
+
+We save the Seurat Object as an rds file with the desired name:
+
+```{r}
+saveRDS(ple5, "srt_01_ple5.rds")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+# References
+
+  Janssenswillen, S., & Bossuyt, F. (2016). Male Courtship Pheromones Induce Cloacal Gaping in Female Newts (Salamandridae). PLOS ONE, 11(1), e0144985. https://doi.org/10.1371/JOURNAL.PONE.0144985
+  
+  Joven, A., & Simon, A. (2018). Homeostatic and regenerative neurogenesis in salamanders. Progress in Neurobiology, 170, 81–98. https://doi.org/10.1016/J.PNEUROBIO.2018.04.006
+  
+  Matsunami, M., Suzuki, M., Haramoto, Y., Fukui, A., Inoue, T., Yamaguchi, K., Uchiyama, I., Mori, K., Tashiro, K., Ito, Y., Takeuchi, T., Suzuki, K.-I. T., Agata, K., Shigenobu, S., & Hayashi, T. (2019). A comprehensive reference transcriptome resource for the Iberian ribbed newt Pleurodeles waltl, an emerging model for developmental and regeneration biology. DNA Research, 26(3), 217–229. https://doi.org/10.1093/dnares/dsz003
+  
+  Woych, J., Gurrola, A. O., Deryckere, A., Jaeger, E. C. B., Gumnit, E., Merello, G., Gu, J., Araus, A. J., Leigh, N. D., Yun, M., Simon, A., & Tosches, M. A. (2022). Cell-type profiling in salamanders identifies innovations in vertebrate forebrain evolution. Science, 377(6610). https://doi.org/10.1126/SCIENCE.ABP9186/SUPPL_FILE/SCIENCE.ABP9186_MDAR_REPRODUCIBILITY_CHECKLIST.PDF
+  
+  Yun, M. H. (2021). Salamander Insights Into Ageing and Rejuvenation. Frontiers in Cell and Developmental Biology, 9, 1441. https://doi.org/10.3389/FCELL.2021.689062/BIBTEX
+
+
+
+

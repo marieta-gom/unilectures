@@ -1,0 +1,265 @@
+---
+title: "Single Cell Course - Protocol Part 3"
+Author: Marieta Gómez Matos
+output:
+  html_document:
+    df_print: paged
+---
+
+# Load packages and dataset
+
+```{r setup}
+library(Seurat)
+library(dplyr)
+```
+
+## Clean the environment
+
+```{r}
+rm(list = ls())
+gc()
+```
+
+```{r}
+ple5 <- readRDS("srt_02_ple5.rds")
+```
+
+```{r}
+ple5
+```
+# Finding clusters of different resolutions
+
+Clusters are group of data (in our case, cells) that share a common set of features (in our case, gene expression profile) and, consequently, are considered to be similar. Depending on the detail of the feature set and the goal of the analysis, the clusters can be more exhaustive or general. Further, subclustering can be later performed within each general initial cluster. 
+
+Clustering allows us to group cells according to a set of desired criteria, what enable us to find different cell types and, consequently, to analyze differentially expressed genes among them. Moreover, it also helps to reduce the effect of dropouts in our sample. However, the concept of cell type in biology is ambiguous, and it is difficult to define how many differentially expressed genes --and to which extent-- are necessary to separate clusters. Therefore, the samples are usually either under- or overclustered. This phenomenon becomes very clear when studying development, since cells are transitioning from different gene expression profiles.
+
+
+## Identify the nearest neighbours
+
+We are going to cluster the cells in order to find different cell types according to their differentially expressed genes. For that, we first have to find the neighbouring cells (considering only 30 dimensions) according to the similarities in their expression profiles:
+
+
+```{r}
+ple5 <- FindNeighbors(ple5, reduction="pca", dims=1:30, k.param=20)
+```
+The k is a clustering resolution parameter that determines the number of neighbouring cells to construct the k-nearest neighbour graph. Thus, the greater the k, the more connected the cells are, so the less clusters there are.  
+
+## Cluster cells
+
+Once we have the neighbouring cells, we can cluster them with different resolutions, controlling in this way the cluster size and number (the lower the resolution, the less restrictive the clustering, so the less and bigger the clusters). It uses the Louvain clustering algorithm, which iteratively merges communities trying to maximize the modularity (maximize the number of shared neighbors within the community while minimizing the ones between communities).
+
+```{r}
+ple5 <- FindClusters(ple5, resolution = c(0.1, 0.5, 0.7, 1, 1.5, 2, 3))
+```
+
+If we have a look to it, we can see that each barcode is assigned to a cluster, which changes depending on the resolution (the higher the resolution, the more clusters there are):
+
+```{r}
+head(ple5[[]])
+```
+
+And we can have a look to the clustering difference produced by each resolution by plotting them:
+
+```{r}
+ple5 <- SetIdent(ple5, value = "orig.ident")
+DimPlot(ple5, group.by = "RNA_snn_res.0.1", label = TRUE)
+```
+
+We only see 10 clusters with the lowest resolution (most likely underclustering of the data).
+
+```{r}
+DimPlot(ple5, group.by="RNA_snn_res.3")
+```
+
+And we see 31 with the highest one (most likely overclustering of the data).
+
+```{r}
+DimPlot(ple5, group.by="RNA_snn_res.1")
+```
+
+For res = 1, the clustering seems to be more reasonable. 
+
+In this way, using different resolution allow us to see the different clustering and to choose the one that seems to be more equilibrated (not excessive over- nor underclustering).
+
+We will use resolution 0.5 for annotating the cells.
+
+```{r}
+ple5 <- SetIdent(ple5, value="RNA_snn_res.0.5")
+```
+
+```{r}
+DimPlot(ple5, group.by="RNA_snn_res.0.5", label = TRUE)
+```
+
+As we see, there are 18 identified clusters with given resolution. Although it seems to be underclustered, we will proceed with it, as it was indicated in the instructions of the protocol.
+
+We can also highlight the cells that express a given gene of interest to make some analysis (as performed later):
+
+```{r}
+FeaturePlot(object=ple5, features="SNAP25", label=TRUE)
+```
+
+Or even combine them:
+
+```{r, fig.width=14, fig.height=5}
+FeaturePlot(ple5, features=c("SLC17A7", "GAD1"), blend=TRUE)
+```
+
+Here, we see the cells that express SLC17A7 and GAD1 in red and green, respectively. The cells that express both at the same time are shown in yellow.
+
+Other example can be:
+
+```{r, fig.width=14, fig.height=5}
+FeaturePlot(ple5, features=c("SLC17A7", "SNAP25"), blend=TRUE)
+```
+
+# Anontating cell types
+
+Anotation is an iterative process that requires previous knowledge on specific marker genes in order to properly separate clusters into groups, e.g., cell types.
+
+## Finding cluster-specific (marker) genes
+
+To find cluster-specific or marker genes, we have to test the differential expression of each gene in a group of cells against all other groups of cells. For that, we use the Wilcoxon rank sum test, which calculates the average log fold change:
+
+
+```{r}
+ple5.markers <- FindAllMarkers(ple5, min.pct=0.25)
+```
+
+As we previously mentioned, the differential expression of each gene in a group of cells has to be tested against all other groups of cells in order to find the differentially expressed genes characteristic of each of them. Since we are doing the statistical testing in many different genes and clusters, the regular p-value of 0.05 is not significant anymore, and the probability of obtaining false positives increases. Consequently, adjusting the p-value will limit the amount of artifacts caused by the multiple testing.
+
+We can have a look to the markers found, as well as order them according to their cluster, p-value or any other characteristic of interest:
+
+```{r}
+View(ple5.markers)
+```
+
+## Exploring gene expression of marker genes 
+
+We have to order the genes in each cluster according to their p-value, so that we can see which ones could be responsible for the clustering and, consequently, specific of them. 
+In this way, we could select the most representative ones and compare them against the literature (https://www.science.org/doi/10.1126/science.abp9186, https://www.proteinatlas.org/ENSG00000163508-EOMES and http://mousebrain.org/adolescent/celltypes.html) to properly assign them to each brain cell type. We can make an example with cluster 0:
+
+Order the marker genes by p-value:
+
+```{r}
+cluster0.markers <- ple5.markers %>%
+  dplyr::filter(cluster == 0) %>%
+  dplyr::arrange(p_val_adj)
+```
+
+Select the top 5 genes:
+
+```{r}
+cluster0.markers_top5 <- cluster0.markers$gene[1:5]
+```
+
+Result visualization: 
+
+```{r, fig.height=9, fig.width=8}
+FeaturePlot(ple5, features = cluster0.markers_top5, label=TRUE)
+```
+
+SHISA8 is a marker gene of olfactory bulb GABAergic neurons (OBGABA).
+
+
+```{r, fig.width=10}
+VlnPlot(ple5, features = cluster0.markers_top5)
+```
+
+As we can see, those genes are not exclussive of cluster 0, but they are very specific and highly expressed. Consequently, getting a profile of highly and differentially expressed genes can help us to identify each cell type. 
+
+We can also compare pairs of clusters independently (e.g., clusters 1 and 4):
+
+```{r}
+ple5.cluster1.4.markers <- FindMarkers(ple5, ident.1 = 1, ident.2 = 4, min.pct = 0.25)
+```
+
+
+```{r}
+View(ple5.cluster1.4.markers)
+```
+
+
+```{r}
+VlnPlot(ple5, features = "PRDM16", idents = c(1,4))
+```
+
+However, since there are already published results about marker genes in Pleurodeles sp. (https://www.science.org/doi/10.1126/science.abp9186), we can compare against them directly:
+
+```{r, fig.width=15, fig.height=25}
+FeaturePlot(ple5, features = c("SNAP25", "SYT1", "RBFOX3", "FOXG1", "SLC17A7", "GAD1", "GAD2", "SHISA8", "SLC17A6", "SOX4", "SOX9", "SOX2", "GFAP", "PDGFRA", "NINJ2", "COL1A2", "PRSS56", "C1QB", "LCP1"), label=TRUE)
+```
+
+```{r, fig.width=15, fig.height=25}
+VlnPlot(ple5, features = c("SNAP25", "SYT1", "RBFOX3", "FOXG1", "SLC17A7", "GAD1", "GAD2", "SHISA8", "SLC17A6", "SOX4", "SOX9", "SOX2", "GFAP", "PDGFRA", "NINJ2", "COL1A2", "PRSS56", "C1QB", "LCP1", "GLI2", "MEX3A"))
+```
+
+Additionally, the top 5 markers of clusters 10, 15 and 18 are plotted, since their identification resulted to be slightly more complicated than the one of the remaining clusters. Therefore, the comparison to the genes used in the dotplot of the paper (https://www.science.org/doi/10.1126/science.abp918) was not enough to identify them:
+
+```{r, fig.width=15, fig.height=25}
+cluster10.markers <- ple5.markers %>%
+  dplyr::filter(cluster == 10) %>%
+  dplyr::arrange(p_val_adj)
+
+FeaturePlot(ple5, features = cluster10.markers$gene[1:5], label=TRUE)
+```
+
+```{r, fig.width=15, fig.height=25}
+cluster15.markers <- ple5.markers %>%
+  dplyr::filter(cluster == 15) %>%
+  dplyr::arrange(p_val_adj)
+
+FeaturePlot(ple5, features = cluster15.markers$gene[1:5], label=TRUE)
+```
+
+```{r}
+cluster15.markers$gene[1:20]
+```
+
+
+
+```{r, fig.width=15, fig.height=25}
+cluster18.markers <- ple5.markers %>%
+  dplyr::filter(cluster == 18) %>%
+  dplyr::arrange(p_val_adj)
+
+FeaturePlot(ple5, features = cluster18.markers$gene[1:5], label=TRUE)
+```
+
+
+## Indentifying broad cell types
+
+- Cluster 0 --> Inhibitory (GAD1/2+) --> SOX2+, SHISA8+ --> Olfatory bulb GABAergic neurons (OBGABA)
+- Cluster 1 --> FOXG1+, SOX9+, SOX2+, GFAP+ --> Ependymoglia (EG)
+- Cluster 2 --> Excitatory (SLC17A7+) --> Telencephalic GLUTamatergic neurons (TEGLU)
+- Cluster 3 --> Excitatory (SLC17A7+) --> Telencephalic GLUTamatergic neurons (TEGLU)
+- Cluster 4 --> Inhibitory (GAD1/2+) --> SOX2+, SHISA8- --> Telencephalic GABAergic neurons (TEGABA)
+- Cluster 5 --> Inhibitory (GAD1/2+) --> SOX2+, SHISA8+ --> Olfatory bulb GABAergic neurons (OBGABA)
+- Cluster 6 --> Inhibitory (GAD1/2+) --> SOX2+, SHISA8- --> Telencephalic GABAergic neurons (TEGABA)
+- Cluster 7 --> SLC17A6+ --> non-TE (mix of cells with very different gene expression profiles, probably underclustered)
+- Cluster 8 --> Excitatory (SLC17A6/7+) --> Telencephalic GLUTamatergic neurons (TEGLU)
+- Cluster 9 --> Looking at the feature plot --> Mix of GAD1+ and SLC17A7+ because of underclustering (SLC17A is only present in the half) --> considered TEGLU
+- Cluster 10 --> Inhibitory (GAD1/2+) and relative absolute pattern similar to TEGABA --> Telencephalic GABAergic neurons (TEGABA)
+- Cluster 11 --> Excitatory (SLC17A7+) --> Telencephalic GLUTamatergic neurons (TEGLU)
+- Cluster 12 --> C1QB+, LCP1+ --> Microglia (MG)
+- Cluster 13 --> COL1A2+ --> Vascular cells (VC)
+- Cluster 14 --> Inhibitory (GAD1/2+) --> SOX2+, SHISA8- --> Telencephalic GABAergic neurons (TEGABA)
+- Cluster 15 --> Inhibitory (GAD1/2+) --> SOX2-, RBFOX3- --> FOXP2+, FOXP4+ (developmental processes) --> GAD1 immature (GAD1.im)
+- Cluster 16 --> GFAP+, PDGFRA+ --> Oligodendrocyte precursor cells (OPC)
+- Cluster 17 --> PRSS56+ --> Olfactory ensheathing cells (OEC)
+- Cluster 18 --> SLC17A6+, TBX21+, EOMES+, CDHR1+ --> Immature olfatory bulb neurons (neuroblast) --> OB.ImN
+  
+- No oligodendrocytes (Olig) found with this resolution (underclustering). It corresponds to those two small dots between cluster 6 and 7 (NINJ2+,  GFAP-, PDGFRA-).
+- No perivascular macrophages (PVM) found with this resolution (underclustering). It corresponds to a small part of the cluster 12 (LPC1+, C1QB-).
+  
+The differences among clusters that are grouped together as major cell types could allow a deeper subclustering later if desired. However, we will not go into this process in this practical.
+
+# Saving the Seurat Object and  Closing the Session
+
+```{r}
+saveRDS(ple5, "srt_03_ple5.rds")
+```
+
+```{r}
+sessionInfo()
+```

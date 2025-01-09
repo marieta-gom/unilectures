@@ -1,0 +1,236 @@
+---
+title: "Single Cell Course - Protocol Part 2"
+Author: Marieta Gómez Matos
+output:
+  html_document:
+    df_print: paged
+---
+
+# Load packages
+
+```{r}
+library(Seurat)
+library(viridis)
+```
+
+
+# Load data
+
+Open the filtered subset of Part 1 containing all the barcodes considered as viable cells:
+
+```{r}
+ple5 <- readRDS("srt_01_ple5.rds")
+
+ple5
+```
+
+# Normalizing, Variable Features and Scaling
+
+## Normalizing
+
+In order to be able to compare each cell, we have to normalize the gene expression. For that, we use logarithmic normalization method in the normalization.method argument within the NormalizeData function, which divides each UMI count per feature (gene expression) by the total reads per cell, multiplies them by a scaling factor (10000) and, lastly, natural-log transforms the results:
+
+```{r}
+ple5 <- NormalizeData(
+  ple5,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000
+)
+```
+## Find variable features
+
+```{r}
+ple5
+```
+Since it is very difficult to properly analyze so many dimensions (13103 features), we have to reduce the dimensionality of the sample. For that, we first have to select which features are relevant for our analysis, i.e. variable between cells, since genes that are differentially expressed are key for determining specific characteristics of different cell groups in our analysis --in our case, cell types--. For that, we can set a threshold, defining the 2000 features with a higher variance (selection.method = "vst") among barcodes,  and leaving out genes whose expression is stable and present among all cells (e.g., housekeeping genes), and, consequently, do not provide any interesting information for further data analysis or cell clustering. 
+
+```{r}
+ple5 <- FindVariableFeatures(ple5, selection.method = "vst", nfeatures = 2000)
+```
+We can visualize the calculated variable features of our dataset, showing the 10 more representative genes with labels:
+
+```{r}
+plt <- VariableFeaturePlot(ple5) 
+
+plt.labels <- LabelPoints( 
+  plot = plt, 
+  points = head(VariableFeatures(ple5), 10), 
+  repel = TRUE, xnudge = 0, ynudge = 0
+) 
+
+plt.labels
+```
+
+Here we can see how the 13103 features (dimensions) are distributed according to their average expression (x axis) and standard variance (y axis). In red, only the 2000 most variable features are highlighted, whereas the remaining ones are shown in black. As we can see, the average expression of a gene can be very high, but it is not significant for our analysis if its variance is very low (similar expression pattern in all cell types).
+
+## Centering and Scaling
+
+Finally, before reducing the dimensionality, we have to center (make the mean gene expression of each gene across cells equal to 0) and scale (make the variance equal to 1) our data to make them comparable.  
+
+```{r}
+ple5 <- ScaleData(ple5)
+```
+# Dimensionality reduction
+
+Our data is high-dimensional, since each expressed gene is a dimension. The higher the dimensionality, the more difficult is to analyze the data (and visualize them). Additionally, the overall distances between points (cells) within the n-dimensional space increase with the number of dimensions, so the differences do not seem to be that significant anymore. 
+
+In spite of selecting the highest differentially expressed features, our current 2000 dimensions are too many to perform a proper analysis. Therefore, we have to reduce the complexity of the sample to be able to analyze it. For that, there are two approaches:
+
+## Linear dimensionality reduction
+
+We start with a high-dimensional space and try to find another lower dimensional space that still can describe most of the variance within our dataset. 
+
+### Principal Component Analysis (PCA)
+
+The Principal Component Analysis (PCA) is one method for linear dimensionality reduction. It consists of describing the data distribution by its biggest axis for each dimension, whose magnitude are the eigenvalues and the direction are given by the eigenvectors. Those eigenvectors are called Principal Components (PCs), correlate to the highest variance within the dataset and are ordered by explained percentage of the data variance. Later, the reference axis is changed to coincide with the eigenvectors and the dimensionality is reduced by projecting the datapoints on the axis of the largest eigenvalue, reducing the dimensionality by 1. Thus, only linear transformations are performed to reduce the dimensionality. 
+
+Here, we run the PCA considering the 2000 dimensions we selected before:
+
+```{r}
+ple5 <- RunPCA(ple5, features = VariableFeatures(ple5))
+```
+
+Visualize the results showing the four first PCs:
+
+```{r, fig.width=12, fig.height=10}
+VizDimLoadings(ple5, dims = 1:4, reduction = "pca")
+```
+
+In this plot, we see the 30 genes that mostly influence each of the four most representative PCs. In other words, we get the genes that explain the major part of our sample variability. 
+
+We can plot the cells in the PC space formed by the two most representative PCAs:
+
+```{r}
+DimPlot(ple5, reduction = "pca", dims = 1:2)
+```
+
+In this plot, each cell is located in the PC space depending on how much they are explained by each of the selected PCs. This, at the same time, depends on the individual gene expression that each cell has in each of the genes that explain each PC (shown in the previous graph). In this way, cells are grouped by similarities in their gene expression profile. Since only linear transformations were performed, the position of each cell along the axis are meaningful and can be directly interpreted and related to their corresponding PC.
+
+We can also highlight the cells that express some gene of interest. In this case, 2 very representative genes in PC1 (SPARC and SNAP25) are shown:
+
+```{r}
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "pca", dims = 1:2)
+```
+
+We see that they separate cells, what will allow us to analyze the data and cluster them later. The color scale indicates the expression level of the selected genes.
+
+We can also compare different PCs (PC1 and PC3 this time):
+
+```{r}
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "pca", dims = c(1, 3))
+```
+
+Here, we can see that there are some cells that are very well separated using PC3 (vertical set of cells) and others that are better separated using PC1 (horizontal set of cells). However, in contrast to the previous graphs (PC1 vs PC2), we barely can see cells that are simultaneously explained by both PCs (just a small diagonal set of cells).
+
+### Elbow plot
+
+Most of the variability is usually explained by the first 1-3 PCs and it is approximately fully explained with 20-30 PCs. In other words, the addition of further PCs does not make a great impact on the explanation of the variability, but increases significantly the complexity of the analysis.
+
+To visualize that, we can use the Elbow plot, in which we can see how the different PCs explain the variability of the sample in a sequential manner. In this way, we can select a PC cutoff and keep a number of PCs that reasonably explains the sample variability without overcomplicating it. 
+
+Plotting the 50 first PCs:
+
+```{r}
+ElbowPlot(ple5, ndims = 50)
+```
+
+The first 20 PCs are more or less representative but, afterwards, it is considerably flat. 
+But there can still be some valuable information in them. Therefore, it is better to keep more dimensions than necessary rather than too few, so that we can later remove some of them using other type of analysis.
+
+For this dataset, we will keep the first 30 dimensions, and then we will continue with the non-linear dimensionality reduction.
+
+## Non-linear dimensionality reduction
+
+Non-linear dimensionality reduction methods depend on neighboring cells and their distances, trying to keep together cells that have similar gene expression profiles. In other words, it considers similarities (distances) between cells rather than their direct correlation to each feature, and it performs non-linear transformations to keep those distances as representative as possible while reducing the dimensionality of the sample. Therefore, the axis are not representative anymore, in contrast to the ones of the linear dimensionality reduction methods. It is usually performed after previous reduction via linear methods (e.g., PCA).
+
+We are going to use two different non-linear dimensionality reduction methods:
+
+### t-SNE
+
+The t-distributed Stochastic Neighbour Embedding (t-SNE) method does not preserve the global distances as good as the next one (UMAP) and it is considerably slower. However, its sensitivity to parameters is much higher.
+
+We can run it selecting those first 30 PCs:
+
+```{r}
+ple5 <- RunTSNE(ple5, dims = 1:30)
+```
+
+And plot the results:
+
+```{r}
+DimPlot(ple5, reduction = "tsne", shape.by = NULL, raster = FALSE)
+```
+
+As previously said, the non-linear transformations cause that the axis are not meaninful anymore, giving them arbitrary numbers --which can help us having an idea about the relative distribution but no real absolute information--. 
+
+We can get very different results each time we run it (in contrast to PCA, which should be the same but flipped in some of the axis). 
+
+Here we can also highlight the cells that express those 2 representative genes we used before:
+
+```{r, fig.width=8, fig.height=4}
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "tsne", pt.size = 0.1, order = TRUE)
+```
+
+We can see that both genes separate our dataset in different groups expressing any, none or both of them, similarly to what we already observed after the PCA.
+
+Note: One problem in the Feature Plot is that, if there are cells expressing and not expressing the gene directly located next to each other, they can superpose and change the perception of the gene expression, i.e. it can look like they are not expressing the gene or on the other way around. If we add "order = TRUE", we will plot the ones with higher gene expression on top, so that we will not underestimate the gene expression. However, this can trigger its overestimation. Another possible solution could be to plot the mean/median of the surrounding cells.
+
+Now, we can repeat the same analysis but choosing the 10 and 50 first dimensions of the PCA to see the differences:
+
+
+```{r, fig.width=8, fig.height=4}
+ple5 <- RunTSNE(ple5, dims = 1:10)
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "tsne", pt.size = 0.1, order = TRUE)
+```
+
+```{r, fig.width=8, fig.height=4}
+ple5 <- RunTSNE(ple5, dims = 1:50)
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "tsne", pt.size = 0.1, order = TRUE)
+```
+
+As we can observe, the general distribution of the t-SNE using only 10 dimensions is more different to the initial one (30 dimensions) than the one using 50 dimensions, i.e. the cells seem to be arranged in less number of groups of bigger size. This could be justified by looking how the variance is explained in the Elbow plot. Therefore, using only 10 dimensions may not be enough to properly distribute the samples according to their variance. However, 50 might be too much, since the information provided by those additional dimensions seems not to be significant and the analysis turns more complicated.
+
+### UMAP
+
+In contrast to t-SNE, the Uniform Manifold Approximation and Projection (UMAP) analysis keeps better the global distances and is faster, although it is not that sensitive to parameters.
+
+If we repeat the exact same analysis but using UMAP:
+
+```{r}
+ple5 <- RunUMAP(ple5, dims = 1:30)
+```
+
+```{r}
+DimPlot(ple5, reduction = "umap")
+```
+
+Here, the global distances are more representative among all different clusters than in t-SNE, in which only the local distances were meaningful (in a relative way, since, as we explained before, absolute distances are not meaningful anymore after non-linear dimensionaity reduction).
+
+
+```{r, fig.width=8, fig.height=4}
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "umap", pt.size = 0.1)
+```
+
+And for 10 and 50 dimensions:
+
+```{r, fig.width=8, fig.height=4}
+ple5 <- RunUMAP(ple5, dims = 1:10)
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "umap", pt.size = 0.1, order = TRUE)
+```
+
+```{r, fig.width=8, fig.height=4}
+ple5 <- RunUMAP(ple5, dims = 1:50)
+FeaturePlot(ple5, c("SPARC", "SNAP25"), reduction = "umap", pt.size = 0.1, order = TRUE)
+```
+
+Again, we see that the there are less and bigger clusters produced by only 10 dimensions (less restrictive, less variability shown) and that the ones produced by 50 dimensions are more similar to the ones produced by only 30, although more small clusters can be seen.
+
+# Saving the Seurat Object and  Closing the Session
+
+```{r}
+saveRDS(ple5, "srt_02_ple5.rds")
+```
+
+```{r}
+sessionInfo()
+```
